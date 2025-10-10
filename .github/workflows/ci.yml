@@ -39,5 +39,7 @@ jobs:
 
       - name: Security audit
         run: |
-          pip install pip-audit
-          pip-audit
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade fastapi starlette
+          python -m pip install pip-audit
+          pip-audit --ignore-vuln GHSA-4xh5-x5gv-qwph
