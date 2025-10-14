@@ -1,8 +1,10 @@
 import os
 from datetime import datetime, timedelta, timezone
 
+# from jose import JWTError,
+import jwt
 from fastapi import HTTPException, Request, status
-from jose import JWTError, jwt
+from jwt import InvalidTokenError as JWTError
 
 from app.utils.logger import audit_log
 
