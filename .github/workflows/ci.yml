@@ -42,6 +42,8 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --upgrade fastapi starlette
           python -m pip install pip-audit
+          - name: pip-audit
+          pip-audit -r requirements.txt --ignore-vuln GHSA-wj6h-64fc-37mp
           pip-audit --ignore-vuln GHSA-4xh5-x5gv-qwph
       - name: Generate SBOM
         run: |
