@@ -23,3 +23,15 @@ Feature: Rate limiting на запись
     Given лимит 100 запросов в минуту на токен
     When один и тот же токен делает >100 POST /key-results за 60 секунд
     Then как минимум один ответ — 429 Too Many Requests
+
+Feature: Аудит и трассировка действий
+  Scenario: Каждое действие фиксируется в audit log
+    Given пользователь делает POST /objectives
+    When действие завершается успешно
+    Then в логе есть запись с actor, method, path и outcome=allow
+
+Feature: Защита CI/CD
+  Scenario: Уязвимая зависимость блокирует сборку
+    Given в requirements есть зависимость с CVE High
+    When запускается GitHub Actions
+    Then пайплайн останавливается на шаге pip-audit

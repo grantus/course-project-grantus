@@ -13,3 +13,5 @@
 | F2 (Perimeter)         | D                    | DoS по записьным методам                              | Rate-limit по токену/пользователю на POST/PUT/DELETE          | NFR-06         | e2e: >100 req/min → 429                                      |
 | AUD (F5)               | R                    | Неполные логи → возможность отрицания действий        | Логирование allow/deny + CRUD с актором/временем              | NFR-07         | Проверка полноты набора событий в CI                         |
 | Supply chain           | T                    | Уязвимые зависимости в рантайме                       | `pip-audit`, SBOM, SLA фикса ≤7 дней                          | NFR-08         | CI отчёт `pip-audit`/SBOM                                    |
+| F5 (Audit Log) | R | Отсутствует трассировка действий пользователей | Расширенное логирование CRUD/Auth событий (non-repudiation) | NFR-09 | e2e: логи содержат actor, method, path, outcome |
+| F6 (CI/CD) | T | Подмена или уязвимость в процессе сборки | `pip-audit`, `cyclonedx-bom`, блокировка сборки при CVE High | NFR-10 | CI отчёт и SBOM артефакт |
