@@ -38,7 +38,9 @@ jobs:
         run: pre-commit run --all-files
 
       - name: pip-audit
-        run: pip-audit -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip-audit
+          pip-audit -r requirements.txt
       - name: Generate SBOM
         run: |
           pip install cyclonedx-bom
