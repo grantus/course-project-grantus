@@ -43,3 +43,7 @@ jobs:
           python -m pip install --upgrade fastapi starlette
           python -m pip install pip-audit
           pip-audit --ignore-vuln GHSA-4xh5-x5gv-qwph
+      - name: Generate SBOM
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py --format json --output sbom.json
