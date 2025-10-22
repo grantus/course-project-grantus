@@ -10,3 +10,5 @@
 | NFR-06 | RATE-01: Лимитирование (slowapi/redis)          | Medium    | 2025.11           |
 | NFR-07 | AUD-01: Аудит-логирование security-событий     | Medium    | 2025.11           |
 | NFR-08 | SEC-DEP-01: Включить pip-audit/SBOM в CI        | High      | 2025.10           |
+| NFR-09 | AUD-02: Audit completeness, трассировка CRUD/Auth событий | Medium | 2025.11 |
+| NFR-10 | SEC-DEP-02: CI/CD Integrity — SBOM + блокировка релиза | Medium | 2025.11 |
