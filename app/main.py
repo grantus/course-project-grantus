@@ -1,4 +1,6 @@
 from datetime import date
+from typing import Any, cast
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -8,19 +10,53 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from app.middleware.auth import auth_middleware
+from app.middleware.correlation import CorrelationIdMiddleware
 from app.utils.logger import audit_log
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="SecDev Course App", version="0.1.0")
-app.state.limiter = limiter
+app.add_middleware(cast(Any, CorrelationIdMiddleware))
+app.state.limiter = limiter  # type: ignore[attr-defined]
 app.add_middleware(SlowAPIMiddleware)  # type: ignore[arg-type]
 app.middleware("http")(auth_middleware)
 
 
+def problem(
+    status: int,
+    title: str,
+    detail: str = "",
+    type_: str = "about:blank",
+    correlation_id: str | None = None,
+    extra: dict | None = None,
+) -> JSONResponse:
+    cid = correlation_id or str(uuid4())
+    body = {
+        "type": type_,
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "correlation_id": cid,
+    }
+    if extra:
+        body.update(extra)
+    return JSONResponse(
+        status_code=status,
+        content=body,
+        media_type="application/problem+json",
+    )
+
+
 @app.exception_handler(RateLimitExceeded)
-async def rate_limit_handler(request: Request, exc: RateLimitExceeded):  # noqa: ARG001
-    audit_log(request, "system", "rate_limit_exceeded", "deny")
-    return JSONResponse(status_code=429, content={"error": "Too many requests"})
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    cid = str(uuid4())
+    audit_log(request, "system", f"rate_limit_exceeded cid={cid}", "deny")
+    return problem(
+        429,
+        "Too Many Requests",
+        "Write operations are rate limited.",
+        type_="https://example.com/problems/rate-limit",
+        correlation_id=cid,
+    )
 
 
 class ApiError(Exception):
@@ -32,24 +68,25 @@ class ApiError(Exception):
 
 @app.exception_handler(ApiError)
 async def api_error_handler(request: Request, exc: ApiError):
-    audit_log(request, "system", f"api_error_{exc.code}", "error")
-    return JSONResponse(
-        status_code=exc.status,
-        content={"code": exc.code, "message": exc.message},
-    )
+    cid = str(uuid4())
+    type_map = {
+        "validation_error": "https://example.com/problems/validation-error",
+        "not_found": "https://example.com/problems/not-found",
+        "auth_error": "https://example.com/problems/auth-error",
+    }
+    title_map = {
+        "validation_error": "Validation error",
+        "not_found": "Not Found",
+        "auth_error": "Authentication/Authorization error",
+    }
+    audit_log(request, "system", f"api_error_{exc.code} cid={cid}", "error")
 
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    audit_log(request, "system", f"http_exception_{exc.status_code}", "error")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "type": "about:blank",
-            "title": exc.detail,
-            "status": exc.status_code,
-            "correlation_id": "req-" + str(id(request)),
-        },
+    return problem(
+        exc.status,
+        title_map.get(exc.code, "Error"),
+        exc.message,
+        type_=type_map.get(exc.code, "about:blank"),
+        correlation_id=cid,
     )
 
 
@@ -110,7 +147,7 @@ def create_objective(
             code="validation_error", message="title must be 1..100 chars", status=422
         )
 
-    if period < date.today().replace(day=1):
+    if period < date.today():
         audit_log(request, str(user_id), "create_objective_invalid_period", "error")
         raise ApiError(
             code="validation_error",
@@ -179,7 +216,7 @@ def create_key_result(
 
     if int(obj["user_id"]) != int(user["id"]):
         audit_log(request, user["id"], "create_key_result_forbidden", "deny")
-        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     kr = {
         "id": len(_DB["key_results"]) + 1,

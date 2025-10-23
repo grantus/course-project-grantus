@@ -1,14 +1,14 @@
 import os
 from datetime import datetime, timedelta, timezone
 
-# from jose import JWTError,
 import jwt
 from fastapi import HTTPException, Request, status
 from jwt import InvalidTokenError as JWTError
 
 from app.utils.logger import audit_log
+from app.utils.secrets import get_jwt_secret
 
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+JWT_SECRET = get_jwt_secret()
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "okrs-api")
 JWT_ISSUER = os.getenv("JWT_ISSUER", "auth-service")
