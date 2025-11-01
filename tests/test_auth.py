@@ -37,7 +37,7 @@ def test_create_objective_unauthorized():
 def test_create_key_result_unauthorized():
     try:
         r = client.post(
-            "/key_result",
+            "/key_results",
             params={
                 "title": "Unauthorized objective",
                 "period": date(2026, 1, 1),
