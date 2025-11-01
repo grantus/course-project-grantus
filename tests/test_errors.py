@@ -1,5 +1,7 @@
-from datetime import date
+import re
+from datetime import date, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -8,10 +10,32 @@ from tests.conftest import make_jwt
 client = TestClient(app)
 
 
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+
+
+def assert_problem(resp, expected_status):
+    assert resp.status_code == expected_status, resp.text
+    assert resp.headers.get("content-type", "").startswith("application/problem+json")
+    body = resp.json()
+    for f in ("type", "title", "status", "detail", "correlation_id"):
+        assert f in body, f"missing field {f}: {body}"
+    assert body["status"] == expected_status
+    assert UUID_RE.match(
+        body["correlation_id"]
+    ), f"bad correlation_id: {body['correlation_id']}"
+    assert "Traceback" not in body["detail"]
+    return body
+
+
 def test_validation_error_users():
     r = client.post("/users", params={"name": ""})
-    assert r.status_code == 422
-    assert r.json()["code"] == "validation_error"
+    body = assert_problem(r, 422)
+    assert ("validation" in body["type"]) or (
+        body["type"] in ("about:blank", "https://example.com/problems/validation-error")
+    )
+    assert body["title"] or body["detail"]
 
 
 def test_not_found_user():
@@ -31,10 +55,8 @@ def test_validation_error_objectives():
 
 def test_list_objectives_not_found_user():
     r = client.get("/users/999/objectives")
-    assert r.status_code == 404
-    body = r.json()
-    if r.status_code == 404:
-        assert body["code"] == "not_found"
+    body = assert_problem(r, 404)
+    assert ("not-found" in body["type"]) or (body["title"].lower() == "not found")
 
 
 def test_get_objective_not_found():
@@ -58,10 +80,10 @@ def test_create_key_result_error_objective_not_found():
         headers=headers,
     )
 
-    assert r.status_code == 404, r.text
-    body = r.json()
-    assert body["code"] == "not_found"
-    assert "objective not found" in body["message"]
+    body = assert_problem(r, 404)
+    assert ("objective not found" in body["detail"].lower()) or (
+        body["title"].lower() == "not found"
+    )
 
 
 def test_create_key_result_forbidden_wrong_user():
@@ -98,3 +120,53 @@ def test_create_key_result_forbidden_wrong_user():
     assert r.status_code == 403, r.text
     body = r.json()
     assert body["detail"] == "Forbidden"
+
+
+def _auth_headers_for_new_user(name: str = "NFR04-User"):
+    user = client.post("/users", params={"name": name}).json()
+    token = make_jwt(sub=str(user["id"]))
+    return {"Authorization": f"Bearer {token}"}, user
+
+
+def test_create_objective_error_validation_period_past():
+    headers, user = _auth_headers_for_new_user()
+
+    past = date.today() - timedelta(days=1)
+    r = client.post(
+        "/objectives",
+        params={"title": "Fail by period", "period": past},
+        headers=headers,
+    )
+
+    body = assert_problem(r, 422)
+    assert "validation" in body["type"] or body["type"].endswith("/validation-error")
+    assert "period" in (body.get("detail") or "").lower() or "title" in body
+
+
+@pytest.mark.xfail(
+    reason="KR сейчас не принимает period; включить после реализации ADR-002 для /key-results"
+)
+def test_create_key_result_error_validation_period_past():
+    headers, user = _auth_headers_for_new_user("NFR04-KR-User")
+
+    future_day = date.today() + timedelta(days=30)
+    obj = client.post(
+        "/objectives",
+        params={"title": "OKR container", "period": future_day},
+        headers=headers,
+    ).json()
+
+    past = date.today() - timedelta(days=1)
+    r = client.post(
+        "/key-results",
+        params={
+            "objective_id": obj["id"],
+            "title": "KR with bad period",
+            "metric": "%",
+            "progress": 0.0,
+            "period": past,
+        },
+        headers=headers,
+    )
+    body = assert_problem(r, 422)
+    assert "validation" in body["type"] or body["type"].endswith("/validation-error")

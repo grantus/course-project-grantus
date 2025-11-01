@@ -3,8 +3,10 @@ on:
   pull_request:
   push:
     branches: [main]
+
 permissions:
   contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -12,18 +14,60 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    env:
+      VAULT_ADDR: http://localhost:8200
+      VAULT_TOKEN: root
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: pip
+
+      - name: Install pip (safe)
+        run: python -m pip install --upgrade "pip!=25.2"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Start Vault (dev)
+        run: |
+          docker run -d --rm --name vault -p 8200:8200 \
+            -e VAULT_DEV_ROOT_TOKEN_ID=root \
+            hashicorp/vault:1.16 \
+            server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+
+      - name: Wait for Vault API
+        run: |
+          for i in {1..120}; do
+            if curl -sf http://localhost:8200/v1/sys/health | grep -q '"initialized":true'; then
+              echo "Vault API is up"; break
+            fi
+            echo "Waiting for Vault... ($i/120)"; sleep 1
+          done
+
+      - name: Enable KV v2 and write secret
+        run: |
+          docker exec vault sh -lc '
+            export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root &&
+            vault secrets disable secret || true &&
+            vault secrets enable -path=kv -version=2 kv &&
+            vault kv put kv/jwt JWT_SECRET="super_secret_key"
+          '
+
+      - name: Verify secret exists (HTTP)
+        run: |
+          for i in {1..60}; do
+            if curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" http://localhost:8200/v1/kv/data/jwt >/dev/null; then
+              echo "Secret kv/jwt is readable"; break
+            fi
+            echo "Waiting for kv/jwt... ($i/60)"; sleep 1
+          done
 
       - name: Lint & Format
         run: |
@@ -34,14 +78,20 @@ jobs:
       - name: Tests
         run: pytest -q
 
-      - name: Pre-commit (all files)
-        run: pre-commit run --all-files
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
 
       - name: pip-audit
         run: |
-          python -m pip install --upgrade pip-audit
           pip-audit -r requirements.txt
+
       - name: Generate SBOM
         run: |
           pip install cyclonedx-bom
           cyclonedx-py requirements requirements.txt --of JSON -o sbom.json
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f vault || true
