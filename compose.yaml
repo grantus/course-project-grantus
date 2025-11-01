@@ -9,7 +9,7 @@ services:
       sh -c 'vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200'
     ports: [ "8200:8200" ]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8200/v1/sys/health | grep -q '\"initialized\":true'"]
+      test: [ "CMD-SHELL", "curl -sf http://127.0.0.1:8200/v1/sys/health | grep -q '\"initialized\":true'" ]
       interval: 2s
       timeout: 2s
       retries: 60
@@ -17,18 +17,22 @@ services:
   vault-init:
     image: hashicorp/vault:1.16
     depends_on:
-      vault: { condition: service_healthy }
+      vault: { condition: service_started }
     environment:
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: root
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
     command: >
       sh -c "
-        echo 'Waiting for Vault...' &&
-        until vault status >/dev/null 2>&1; do sleep 1; done &&
-        echo 'Enabling kv v2 and seeding secret' &&
-        vault secrets disable secret || true &&
-        vault secrets enable -path=kv -version=2 kv &&
-        vault kv put kv/jwt JWT_SECRET='super_secret_key'
+        set -euo pipefail;
+        echo 'Waiting for Vault...';
+        until vault status >/dev/null 2>&1; do sleep 1; done;
+        # re-enable kv
+        vault secrets disable kv >/dev/null 2>&1 || true;
+        vault secrets enable -path=kv -version=2 kv >/dev/null;
+        # put secret WITHOUT echoing it
+        vault kv put kv/jwt JWT_SECRET=\"$JWT_SECRET\" >/dev/null;
+        echo 'Vault is seeded';
       "
     restart: "no"
 
@@ -38,10 +42,12 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: root
+      VAULT_TOKEN: ${APP_VAULT_TOKEN:?APP_VAULT_TOKEN is required}
+      DB_DSN: postgresql://app:app@db:5432/app
     depends_on:
       vault-init: { condition: service_completed_successfully }
     ports: [ "8000:8000" ]
+
 
   tests:
     build:
@@ -52,6 +58,16 @@ services:
       PYTHONUNBUFFERED: "1"
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: root
+      DB_DSN: postgresql://app:app@db:5432/app
     depends_on:
       vault-init: { condition: service_completed_successfully }
     command: ["pytest", "-q"]
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
