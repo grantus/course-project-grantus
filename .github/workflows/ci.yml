@@ -3,10 +3,8 @@ on:
   pull_request:
   push:
     branches: [main]
-
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -14,11 +12,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    env:
-      VAULT_ADDR: http://localhost:8200
-      VAULT_TOKEN: root
-
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +29,6 @@ jobs:
           POSTGRES_DB=app
           POSTGRES_USER=app
           POSTGRES_PASSWORD=app
-
           cat > .env <<EOF
           JWT_SECRET=${JWT_SECRET}
           PYTHONUNBUFFERED=${PYTHONUNBUFFERED}
@@ -49,12 +41,10 @@ jobs:
           POSTGRES_USER=${POSTGRES_USER}
           POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
           EOF
-
       - name: Start Vault + DB + init
         run: |
           docker compose --env-file .env up -d vault db
           docker compose --env-file .env up -d vault-init
-
       - name: Wait for vault-init
         run: |
           for i in $(seq 1 60); do
@@ -72,13 +62,20 @@ jobs:
             fi
             sleep 1
           done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install --with dev --no-root --no-interaction
       - name: Lint & Format
         run: |
           poetry run ruff check --output-format=github .
           poetry run black --check .
           poetry run isort --check-only .
-
       - name: Check user inside container (id -u != 0)
         run: |
           CONTAINER_UID=$(docker compose run --rm --no-deps app id -u)
@@ -87,14 +84,12 @@ jobs:
             echo "ERROR: container runs as root"
             exit 1
           fi
-
       - name: Hadolint on Dockerfile
         run: |
           docker run --rm -i hadolint/hadolint < Dockerfile > hadolint-report.txt
           if [ ! -s hadolint-report.txt ]; then
             echo "Hadolint: no issues found." > hadolint-report.txt
           fi
-
       - name: Trivy
         run: |
           docker compose build app
@@ -107,36 +102,30 @@ jobs:
       - name: Wait for app to become healthy
         run: |
           docker compose up -d app
-
           for i in $(seq 1 30); do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' okr-service-app)
             echo "Health status: $STATUS"
-
             if [ "$STATUS" = "healthy" ]; then
               echo "Container is healthy"
               break
             fi
-
             if [ "$STATUS" = "unhealthy" ]; then
               echo "Container is unhealthy"
               docker compose logs app
               exit 1
             fi
-
             sleep 2
           done
-
           STATUS=$(docker inspect --format='{{.State.Health.Status}}' okr-service-app)
           if [ "$STATUS" != "healthy" ]; then
             echo "Timed out waiting for healthy (status: $STATUS)"
             docker compose logs app
             exit 1
           fi
-
       - name: Tests
         run: docker compose --env-file .env run --rm tests
 
-      - name: Pre-commit
+      - name: Pre-commit (all files)
         run: poetry run pre-commit run --all-files
 
       - name: pip-audit
@@ -144,8 +133,7 @@ jobs:
           poetry run pip-audit \
             --strict \
             --ignore-vuln GHSA-wj6h-64fc-37mp
-
-      - name: Generate SBOM
+      - name: Generate SBOM (CycloneDX)
         run: |
           pip install cyclonedx-bom
           cyclonedx-py poetry . --of json -o sbom.json
