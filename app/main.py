@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any, cast
 from uuid import uuid4
@@ -11,38 +12,45 @@ from slowapi.util import get_remote_address
 
 from app.middleware.auth import auth_middleware
 from app.middleware.correlation import CorrelationIdMiddleware
+from app.utils import http_client
+from app.utils.db import (
+    create_key_result_db,
+    create_objective_db,
+    create_user_db,
+    get_objective_db,
+    get_user_db,
+    init_db,
+    list_objectives_for_user_db,
+)
 from app.utils.logger import audit_log
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+    http_client.close()
+
+
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="SecDev Course App", version="0.1.0")
+app = FastAPI(title="SecDev Course App", version="0.1.0", lifespan=lifespan)
 app.add_middleware(cast(Any, CorrelationIdMiddleware))
 app.state.limiter = limiter  # type: ignore[attr-defined]
 app.add_middleware(SlowAPIMiddleware)  # type: ignore[arg-type]
 app.middleware("http")(auth_middleware)
 
 
-def problem(
-    status: int,
-    title: str,
-    detail: str = "",
-    type_: str = "about:blank",
-    correlation_id: str | None = None,
-    extra: dict | None = None,
-) -> JSONResponse:
-    cid = correlation_id or str(uuid4())
-    body = {
-        "type": type_,
-        "title": title,
-        "status": status,
-        "detail": detail,
-        "correlation_id": cid,
-    }
-    if extra:
-        body.update(extra)
+def problem(status: int, title: str, detail: str, type_: str = "about:blank"):
+    cid = str(uuid4())
     return JSONResponse(
+        {
+            "type": type_,
+            "title": title,
+            "status": status,
+            "detail": detail,
+            "correlation_id": cid,
+        },
         status_code=status,
-        content=body,
-        media_type="application/problem+json",
     )
 
 
@@ -55,7 +63,6 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         "Too Many Requests",
         "Write operations are rate limited.",
         type_="https://example.com/problems/rate-limit",
-        correlation_id=cid,
     )
 
 
@@ -86,7 +93,6 @@ async def api_error_handler(request: Request, exc: ApiError):
         title_map.get(exc.code, "Error"),
         exc.message,
         type_=type_map.get(exc.code, "about:blank"),
-        correlation_id=cid,
     )
 
 
@@ -94,13 +100,6 @@ async def api_error_handler(request: Request, exc: ApiError):
 def health(request: Request):
     audit_log(request, "system", "health_check", "allow")
     return {"status": "ok"}
-
-
-_DB = {
-    "users": [],
-    "objectives": [],
-    "key_results": [],
-}
 
 
 def get_current_user(request: Request):
@@ -119,20 +118,19 @@ def create_user(request: Request, name: str):
         raise ApiError(
             code="validation_error", message="name must be 1..100 chars", status=422
         )
-    new_user = {"id": len(_DB["users"]) + 1, "name": name}
-    _DB["users"].append(new_user)
-    audit_log(request, "system", "create_user", "allow")
-    return new_user
+    row = create_user_db(name)
+    audit_log(request, "system", f"create_user_db_{row['id']}", "allow")
+    return row
 
 
 @app.get("/users/{user_id}")
 def get_user(request: Request, user_id: int):
-    for it in _DB["users"]:
-        if it["id"] == user_id:
-            audit_log(request, "system", f"get_user_{user_id}", "allow")
-            return it
-    audit_log(request, "system", f"get_user_{user_id}", "not_found")
-    raise ApiError(code="not_found", message="item not found", status=404)
+    row = get_user_db(user_id)
+    if not row:
+        audit_log(request, "system", f"get_user_{user_id}", "not_found")
+        raise ApiError(code="not_found", message="user not found", status=404)
+    audit_log(request, "system", f"get_user_{user_id}", "allow")
+    return row
 
 
 @app.post("/objectives")
@@ -155,35 +153,31 @@ def create_objective(
             status=422,
         )
 
-    obj = {
-        "id": len(_DB["objectives"]) + 1,
-        "user_id": user_id,
-        "title": title,
-        "period": period,
-    }
-    _DB["objectives"].append(obj)
+    obj = create_objective_db(user_id, title, period)
     audit_log(request, str(user_id), f"create_objective_{obj['id']}", "allow")
     return obj
 
 
 @app.get("/users/{user_id}/objectives")
 def get_user_objectives(request: Request, user_id: int):
-    if not any(user["id"] == user_id for user in _DB["users"]):
+    user_row = get_user_db(user_id)
+    if not user_row:
         audit_log(request, "system", f"get_user_objectives_{user_id}", "not_found")
         raise ApiError(code="not_found", message="user not found", status=404)
-    objectives = [obj for obj in _DB["objectives"] if obj["user_id"] == user_id]
+
+    objectives = list_objectives_for_user_db(user_id)
     audit_log(request, "system", f"get_user_objectives_{user_id}", "allow")
     return objectives
 
 
 @app.get("/objectives/{obj_id}")
 def get_objective(request: Request, obj_id: int):
-    for obj in _DB["objectives"]:
-        if obj["id"] == obj_id:
-            audit_log(request, "system", f"get_objective_{obj_id}", "allow")
-            return obj
-    audit_log(request, "system", f"get_objective_{obj_id}", "not_found")
-    raise ApiError(code="not_found", message="objective not found", status=404)
+    obj = get_objective_db(obj_id)
+    if not obj:
+        audit_log(request, "system", f"get_objective_{obj_id}", "not_found")
+        raise ApiError(code="not_found", message="objective not found", status=404)
+    audit_log(request, "system", f"get_objective_{obj_id}", "allow")
+    return obj
 
 
 @app.post("/key-results")
@@ -207,7 +201,7 @@ def create_key_result(
             code="validation_error", message="progress must be 0..1", status=422
         )
 
-    obj = next((o for o in _DB["objectives"] if o["id"] == objective_id), None)
+    obj = get_objective_db(objective_id)
     if not obj:
         audit_log(
             request, user["id"], f"create_key_result_obj_{objective_id}", "not_found"
@@ -218,14 +212,6 @@ def create_key_result(
         audit_log(request, user["id"], "create_key_result_forbidden", "deny")
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    kr = {
-        "id": len(_DB["key_results"]) + 1,
-        "objective_id": objective_id,
-        "title": title,
-        "metric": metric,
-        "progress": progress,
-    }
-    _DB["key_results"].append(kr)
-
+    kr = create_key_result_db(objective_id, title, metric, progress)
     audit_log(request, user["id"], f"create_key_result_{kr['id']}", "allow")
     return kr
