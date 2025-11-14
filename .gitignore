@@ -9,6 +9,8 @@ build/
 .env
 .pytest_cache/
 .coverage
+hadolint-report.txt
+
 # IDE
 .vscode/
 .idea/
