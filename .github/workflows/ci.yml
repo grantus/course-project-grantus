@@ -183,7 +183,7 @@ jobs:
       - name: Tests
         run: docker compose --env-file .env run --rm tests
 
-      - name: Pre-commit (all files)
+      - name: Pre-commit
         run: poetry run pre-commit run --all-files
 
       - name: pip-audit
