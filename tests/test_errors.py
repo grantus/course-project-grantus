@@ -17,6 +17,7 @@ UUID_RE = re.compile(
 
 def assert_problem(resp, expected_status):
     assert resp.status_code == expected_status, resp.text
+    assert resp.headers.get("content-type", "").startswith("application/problem+json")
     body = resp.json()
     for f in ("type", "title", "status", "detail", "correlation_id"):
         assert f in body, f"missing field {f}: {body}"

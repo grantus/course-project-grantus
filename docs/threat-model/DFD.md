@@ -1,24 +1,28 @@
 ## Диаграмма (Mermaid)
 ```mermaid
-graph LR
-  EDGE[Edge]
-  CORE[Core]
-  CICD[CI/CD]
+flowchart LR
+    %% --- Trust boundaries ---
+    subgraph Edge
+        U[Пользователь]
+    end
 
-  U[User] --> APP[FastAPI App]
-  APP --> DB[(Database)]
-  APP --> U
-  APP --> U
-  APP --> AUD[(Audit Log Storage)]
+    subgraph Core
+        APP[(FastAPI App)]
+        DB[(Database)]
+        AUD[(Audit Log Storage)]
+    end
 
-  DEV[Developer] --> CI[GitHub Actions: pip-audit, SBOM]
+    subgraph CI
+        CI[(GitHub Actions<br/>pip-audit + SBOM)]
+    end
 
-  EDGE --- U
-  EDGE --- DEV
-  CORE --- APP
-  CORE --- DB
-  CORE --- AUD
-  CICD --- CI
+    %% --- Data flows ---
+    U -->|F1: AuthN/AuthZ (JWT)| APP
+    APP -->|F2: CRUD (objectives, key-results)| DB
+    APP -->|F3: Errors (RFC7807)| U
+    APP -->|F4: Rate limit / validation feedback| U
+    APP -->|F5: Audit events (CRUD/Auth, non-repudiation)| AUD
+    Dev[Developer] -->|F6: CI/CD supply chain (source, deps)| CI
 ```
 
 ## Список потоков

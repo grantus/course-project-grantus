@@ -1,66 +1,44 @@
 services:
   vault:
     image: hashicorp/vault:1.16
-    container_name: okr-service-vault
+    container_name: vault
     cap_add: [ "IPC_LOCK" ]
-    env_file:
-      - .env
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_ROOT_TOKEN_ID: root
     command: >
       sh -c 'vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200'
     ports: [ "8200:8200" ]
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8200/v1/sys/health | grep -q '\"initialized\":true'"]
       interval: 2s
       timeout: 2s
       retries: 60
 
   vault-init:
     image: hashicorp/vault:1.16
-    container_name: okr-service-vault-init
     depends_on:
-      vault: { condition: service_started }
-    env_file:
-      - .env
+      vault: { condition: service_healthy }
     environment:
-      VAULT_ADDR: ${VAULT_ADDR}
-      VAULT_TOKEN: ${VAULT_TOKEN}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
     command: >
       sh -c "
-        set -euo pipefail;
-        echo 'Waiting for Vault...';
-        until vault status >/dev/null 2>&1; do sleep 1; done;
-        # re-enable kv
-        vault secrets disable kv >/dev/null 2>&1 || true;
-        vault secrets enable -path=kv -version=2 kv >/dev/null;
-        # put secret WITHOUT echoing it
-        vault kv put kv/jwt JWT_SECRET=\"$JWT_SECRET\" >/dev/null;
-        echo 'Vault is seeded';
+        echo 'Waiting for Vault...' &&
+        until vault status >/dev/null 2>&1; do sleep 1; done &&
+        echo 'Enabling kv v2 and seeding secret' &&
+        vault secrets disable secret || true &&
+        vault secrets enable -path=kv -version=2 kv &&
+        vault kv put kv/jwt JWT_SECRET='super_secret_key'
       "
     restart: "no"
 
   app:
     build: .
-    container_name: okr-service-app
+    container_name: okr-service
     environment:
-      VAULT_ADDR: ${VAULT_ADDR}
-      VAULT_TOKEN: ${APP_VAULT_TOKEN:?APP_VAULT_TOKEN is required}
-      DB_DSN: ${DB_DSN}
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/" ]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      PYTHONUNBUFFERED: "1"
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
     depends_on:
       vault-init: { condition: service_completed_successfully }
     ports: [ "8000:8000" ]
@@ -68,23 +46,12 @@ services:
   tests:
     build:
       context: .
-      target: test
-    container_name: okr-service-tests
+      target: build
+    container_name: secdev-tests
     environment:
-      VAULT_ADDR: ${VAULT_ADDR}
-      VAULT_TOKEN: ${VAULT_TOKEN}
-      DB_DSN: ${DB_DSN}
+      PYTHONUNBUFFERED: "1"
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
     depends_on:
       vault-init: { condition: service_completed_successfully }
-
-  db:
-    image: postgres:16
-    container_name: okr-service-db
-    env_file:
-      - .env
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "5432:5432"
+    command: ["pytest", "-q"]

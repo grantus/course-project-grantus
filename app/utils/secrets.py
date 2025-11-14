@@ -15,7 +15,6 @@ def _read_from_vault(client: hvac.Client) -> str:
     res = client.secrets.kv.v2.read_secret_version(
         mount_point=MOUNT_POINT,
         path=SECRET_PATH,
-        raise_on_deleted_version=True,
     )
     data = res["data"]["data"]
     if SECRET_KEY not in data or not data[SECRET_KEY]:
