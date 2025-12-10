@@ -51,3 +51,5 @@ docker compose up --build
 ```
 
 См. также: `SECURITY.md`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`.
+
+![CI](https://github.com/grantus/course-project-grantus/actions/workflows/ci.yml/badge.svg)
