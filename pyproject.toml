@@ -65,6 +65,7 @@ black = "24.8.0"
 isort = "5.13.2"
 pre-commit = "3.8.0"
 pip-audit = "*"
+urllib3 = "2.6.0"
 
 [build-system]
 requires = ["poetry-core"]
