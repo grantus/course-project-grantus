@@ -89,8 +89,9 @@ async def auth_middleware(request: Request, call_next):
 
         request.state.user = {"id": sub, "claims": payload}
 
-    except JWTError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    except JWTError:
+        audit_log(request, "anonymous", "auth_invalid_token", "deny")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     request.state.user = {"id": sub, "claims": payload}
     return await call_next(request)
