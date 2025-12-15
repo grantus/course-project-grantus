@@ -1,0 +1,12 @@
+rules:
+  - id: fastapi-http-exception-leaks-internals
+    languages: [python]
+    message: "Детали исключения возвращаются клиенту через HTTPException(detail=...). Необходимо использовать общий текст, а детали логировать."
+    severity: WARNING
+    patterns:
+      - pattern: raise HTTPException(..., detail=$D)
+      - metavariable-pattern:
+          metavariable: $D
+          pattern-either:
+            - pattern: f"...{$X}..."
+            - pattern: str($X)
