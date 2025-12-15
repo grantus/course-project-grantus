@@ -1,0 +1,119 @@
+name: Security - DAST (ZAP baseline)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**/*.py"
+      - "compose.yaml"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/ci-p11-dast.yml"
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "compose.yaml"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/ci-p11-dast.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  dast:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      APP_PORT: "8000"
+      HEALTH_PATH: "/health"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure evidence dirs
+        run: mkdir -p EVIDENCE/P11
+
+      - name: Generate .env for DAST (dummy)
+        shell: bash
+        run: |
+          cat > .env <<EOF
+          JWT_SECRET=p11_dummy_secret
+          DB_DSN=postgresql://app:app@db:5432/app
+          POSTGRES_DB=app
+          POSTGRES_USER=app
+          POSTGRES_PASSWORD=app
+          PYTHONUNBUFFERED=1
+          VAULT_ADDR=http://vault:8200
+          VAULT_DEV_ROOT_TOKEN_ID=dummy-root-token
+          VAULT_TOKEN=dummy-token
+          APP_VAULT_TOKEN=dummy-app-token
+          EOF
+
+      - name: Create P11 compose override (ports/health/jwt + disable vault-init)
+        shell: bash
+        run: |
+          cat > compose.p11.override.yml <<'YML'
+          services:
+            vault-init:
+              entrypoint: ["sh", "-c", "echo 'P11: vault-init disabled'; exit 0"]
+
+            app:
+              environment:
+                JWT_SECRET: ${JWT_SECRET}
+              ports:
+                - "8000:8080"
+          YML
+
+      - name: Start stack for DAST
+        shell: bash
+        run: |
+          set -e
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env up -d --build db vault-init app
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env ps
+
+      - name: Wait for /health
+        shell: bash
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -sf "http://localhost:${APP_PORT}${HEALTH_PATH}" >/dev/null; then
+              echo "Health endpoint OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for health"
+          docker compose -f compose.yaml -f compose.p11.override.yaml --env-file .env logs --tail=200 app || true
+          exit 1
+
+      - name: ZAP Baseline
+        shell: bash
+        run: |
+          docker run --rm --network host -v "$PWD:/zap/wrk" owasp/zap2docker-stable \
+            zap-baseline.py \
+              -t "http://localhost:${APP_PORT}" \
+              -r zap_baseline.html \
+              -J zap_baseline.json \
+              -d || true
+
+          mv zap_baseline.* EVIDENCE/P11/ || true
+
+      - name: Upload P11 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P11_EVIDENCE
+          path: EVIDENCE/P11
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env down -v
