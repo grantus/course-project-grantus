@@ -1,0 +1,273 @@
+name: Security - DAST (ZAP baseline)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**/*.py"
+      - "compose.yaml"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/ci-p11-dast.yml"
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "compose.yaml"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/ci-p11-dast.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  dast:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      APP_PORT: "8000"
+      HEALTH_PATH: "/health"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure evidence dirs
+        run: |
+          mkdir -p EVIDENCE/P11
+          echo "P11 evidence placeholder" > EVIDENCE/P11/_keep.txt
+
+      - name: Generate .env for DAST (dummy, consistent)
+        shell: bash
+        run: |
+          cat > .env <<'EOF'
+          JWT_SECRET=p11_dummy_secret
+          POSTGRES_DB=app
+          POSTGRES_USER=app
+          POSTGRES_PASSWORD=app
+          DB_DSN=postgresql://app:app@db:5432/app
+          VAULT_ADDR=http://vault:8200
+          VAULT_DEV_ROOT_TOKEN_ID=p11-dummy-root
+          VAULT_TOKEN=p11-dummy-root
+          APP_VAULT_TOKEN=p11-dummy-root
+          PYTHONUNBUFFERED=1
+          EOF
+
+      - name: Detect FastAPI import path for uvicorn
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY' > detected.txt
+          import re
+          from pathlib import Path
+
+          root = Path(".").resolve()
+
+          def score(path: Path, text: str) -> int:
+            s = 0
+            if path.name == "main.py": s += 50
+            if path.name in {"app.py", "api.py"}: s += 15
+            if "src" in path.parts: s += 10
+            if "app" in path.parts: s += 10
+            if re.search(r"\bapp\s*=\s*FastAPI\s*\(", text): s += 25
+            if any(p in {"tests", "test"} for p in path.parts): s -= 100
+            return s
+
+          cands = []
+          for p in root.rglob("*.py"):
+            if any(part.startswith(".") for part in p.parts):
+              continue
+            try:
+              text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+              continue
+            if "FastAPI(" not in text:
+              continue
+
+            m = re.search(r"(\w+)\s*=\s*FastAPI\s*\(", text)
+            var = m.group(1) if m else "app"
+
+            rel = p.relative_to(root).with_suffix("")
+            if rel.parts and rel.parts[0] == "src":
+              app_dir = "/app/src"
+              mod_parts = rel.parts[1:]
+            else:
+              app_dir = "/app"
+              mod_parts = rel.parts
+
+            if not mod_parts:
+              continue
+
+            module = ".".join(mod_parts)
+            target = f"{module}:{var}"
+            cands.append((score(p, text), str(p), app_dir, target))
+
+          if not cands:
+            print("UVICORN_APP_DIR=/app")
+            print("UVICORN_APP=main:app")
+          else:
+            cands.sort(key=lambda x: x[0], reverse=True)
+            _, file_path, app_dir, target = cands[0]
+            print(f"UVICORN_APP_DIR={app_dir}")
+            print(f"UVICORN_APP={target}")
+            print(f"UVICORN_FILE={file_path}")
+          PY
+
+          cat detected.txt
+
+          awk -F= '/^UVICORN_/ {print $1"="$2}' detected.txt >> "$GITHUB_ENV"
+
+      - name: Create P11 compose override (run uvicorn + healthcheck + dummy vault token)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Using UVICORN_APP_DIR=${UVICORN_APP_DIR}"
+          echo "Using UVICORN_APP=${UVICORN_APP}"
+
+          cat > compose.p11.override.yml <<YML
+          services:
+            vault:
+              command: >
+                sh -c 'vault server -dev -dev-root-token-id=\${VAULT_DEV_ROOT_TOKEN_ID} -dev-listen-address=0.0.0.0:8200'
+
+            app:
+              environment:
+                JWT_SECRET: \${JWT_SECRET}
+
+              command: ["python", "-m", "uvicorn", "--app-dir", "${UVICORN_APP_DIR}", "${UVICORN_APP}", "--host", "0.0.0.0", "--port", "8080"]
+
+              ports:
+                - "8000:8080"
+
+              healthcheck:
+                test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080${HEALTH_PATH}"]
+                interval: 10s
+                timeout: 5s
+                retries: 15
+                start_period: 30s
+          YML
+
+      - name: Start db + vault (and vault-init)
+        shell: bash
+        run: |
+          set -e
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env up -d --build db vault vault-init
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env ps
+
+      - name: Wait for Postgres ready
+        shell: bash
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env exec -T db \
+              pg_isready -U app -d app >/dev/null 2>&1; then
+              echo "Postgres is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for Postgres"
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --tail=200 db || true
+          exit 1
+
+      - name: Start app
+        shell: bash
+        run: |
+          set -e
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env up -d --build app
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env ps
+
+      - name: Wait for /health on localhost
+        shell: bash
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -fsS --connect-timeout 1 --max-time 2 "http://localhost:${APP_PORT}${HEALTH_PATH}" >/dev/null; then
+              echo "Health endpoint OK on localhost"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Timed out waiting for health on localhost"
+          echo "== docker compose ps =="
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env ps || true
+
+          echo "== app logs (tail 200) =="
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --tail=200 app || true
+
+          echo "== vault/vault-init logs (tail 200) =="
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --tail=200 vault vault-init || true
+
+          echo "== db logs (tail 200) =="
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --tail=200 db || true
+
+          exit 1
+
+      - name: Smoke test endpoints (before ZAP)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== curl / =="
+          curl -i "http://localhost:${APP_PORT}/" || true
+          echo "== curl /robots.txt =="
+          curl -i "http://localhost:${APP_PORT}/robots.txt" || true
+          echo "== curl /sitemap.xml =="
+          curl -i "http://localhost:${APP_PORT}/sitemap.xml" || true
+          echo "== curl /health =="
+          curl -i "http://localhost:${APP_PORT}${HEALTH_PATH}" || true
+
+          echo "== app logs (tail 200) =="
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --tail=200 app || true
+
+      - name: ZAP Baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p zap-wrk EVIDENCE/P11
+          echo "keep" > EVIDENCE/P11/_keep.txt
+
+          chmod -R a+rwx zap-wrk
+
+          docker run --rm \
+            --network host \
+            -v "$PWD/zap-wrk:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "http://localhost:${APP_PORT}" \
+              -r zap_baseline.html \
+              -J zap_baseline.json \
+              -d || true
+
+          ls -la zap-wrk || true
+          mv zap-wrk/zap_baseline.* EVIDENCE/P11/ || true
+
+      - name: Collect docker diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p EVIDENCE/P11
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env ps -a > EVIDENCE/P11/compose_ps.txt || true
+          docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env logs --no-color > EVIDENCE/P11/compose_logs.txt || true
+
+      - name: Upload P11 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P11_EVIDENCE
+          path: EVIDENCE/P11
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f compose.yaml -f compose.p11.override.yml --env-file .env down -v

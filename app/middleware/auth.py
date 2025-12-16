@@ -1,9 +1,11 @@
 import os
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import jwt
-from fastapi import HTTPException, Request, status
+from fastapi import Request
 from jwt import InvalidTokenError as JWTError
+from starlette.responses import JSONResponse
 
 from app.utils.logger import audit_log
 from app.utils.secrets import get_jwt_secret
@@ -30,11 +32,33 @@ def make_jwt(sub: str = "1", minutes: int = 5, valid: bool = True):
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/users"}
+PUBLIC_PATHS = {
+    "/",
+    "/health",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/openapi.json",
+    "/docs",
+    "/redoc",
+}
+
+
+def auth_problem(status_code: int, title: str, detail: str):
+    return JSONResponse(
+        {
+            "type": "https://example.com/problems/auth-error",
+            "title": title,
+            "status": status_code,
+            "detail": detail,
+            "correlation_id": str(uuid4()),
+        },
+        status_code=status_code,
+    )
 
 
 async def auth_middleware(request: Request, call_next):
-    path = request.url.path.rstrip("/")
+    raw_path = request.url.path
+    path = raw_path.rstrip("/") or "/"
     method = request.method.upper()
 
     if path in PUBLIC_PATHS:
@@ -59,9 +83,11 @@ async def auth_middleware(request: Request, call_next):
 
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
+        audit_log(request, "anonymous", "auth_missing_header", "deny")
+        return auth_problem(
+            401,
+            "Missing or invalid Authorization header",
+            "Missing or invalid Authorization header",
         )
 
     token = auth_header.removeprefix("Bearer ").strip()
@@ -81,17 +107,19 @@ async def auth_middleware(request: Request, call_next):
         sub = payload.get("sub")
 
         if not sub:
-            raise HTTPException(status_code=401, detail="Token missing sub claim")
+            return auth_problem(
+                401, "Token missing sub claim", "Token missing sub claim"
+            )
         if exp and now > exp:
-            raise HTTPException(status_code=401, detail="Token expired")
+            return auth_problem(401, "Token expired", "Token expired")
         if nbf and now < nbf:
-            raise HTTPException(status_code=401, detail="Token not yet valid")
+            return auth_problem(401, "Token not yet valid", "Token not yet valid")
 
         request.state.user = {"id": sub, "claims": payload}
 
     except JWTError:
         audit_log(request, "anonymous", "auth_invalid_token", "deny")
-        raise HTTPException(status_code=401, detail="Invalid token")
+        return auth_problem(401, "Invalid token", "Invalid token")
 
     request.state.user = {"id": sub, "claims": payload}
     return await call_next(request)

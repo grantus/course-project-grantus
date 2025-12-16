@@ -4,7 +4,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -94,6 +94,21 @@ async def api_error_handler(request: Request, exc: ApiError):
         exc.message,
         type_=type_map.get(exc.code, "about:blank"),
     )
+
+
+@app.get("/")
+def root(request: Request):
+    return {"status": "ok"}
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    return "User-agent: *\nDisallow:\n"
+
+
+@app.get("/sitemap.xml")
+def sitemap():
+    return Response(status_code=404)
 
 
 @app.get("/health")
